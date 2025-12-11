@@ -1,0 +1,95 @@
+// Jenkinsfile
+pipeline {
+    agent any
+
+    environment {
+        // Nexus configuration
+        NEXUS_URL = 'nexus.your-company.com'  // Update with your Nexus URL
+        NEXUS_REPO = 'docker-repository'      // Your Nexus Docker repository name
+        NEXUS_CREDENTIALS = 'nexus-credentials' // Jenkins credentials ID for Nexus
+        APP_NAME = 'knote'
+        DOCKER_IMAGE = "${NEXUS_URL}/${NEXUS_REPO}/${APP_NAME}:${env.BUILD_NUMBER}"
+
+        // Environment variables
+        JAVA_HOME = '/usr/lib/jvm/java-11-amazon-corretto.x86_64'
+        PATH = "${JAVA_HOME}/bin:${env.PATH}"
+    }
+
+    stages {
+        stage('Setup Environment') {
+            steps {
+                sh '''
+                    # Install required packages
+                    sudo yum update -y
+                    sudo yum install -y java-11-amazon-corretto git maven
+                    sudo yum install -y docker
+
+                    # Start Docker service
+                    sudo systemctl start docker
+                    sudo usermod -aG docker $USER
+                    sudo chmod 666 /var/run/docker.sock
+
+                    # Verify installations
+                    java -version
+                    mvn -version
+                    docker --version
+                '''
+            }
+        }
+
+        stage('Checkout Code') {
+            steps {
+                // Checkout from GitHub
+                git branch: 'main',
+                    url: 'https://github.com/Sooria16/knote.git'
+
+                // Change to the project directory
+                dir('01') {
+                    // Update application.properties
+                    sh '''
+                        # Update MongoDB connection string
+                        sed -i 's/spring.data.mongodb.uri=.*/spring.data.mongodb.uri=${MONGO_URL:-mongodb:\\/\\/mongonew:27017\\/dev}/' src/main/resources/application.properties
+
+                        # Build the application
+                        mvn clean install -DskipTests
+
+                        # Copy the JAR file
+                        cp target/knote-java-1.0.0.jar ./
+                    '''
+                }
+            }
+        }
+
+        stage('Build and Push Docker Image') {
+            steps {
+                script {
+                    // Build Docker image
+                    docker.withRegistry("https://${NEXUS_URL}", NEXUS_CREDENTIALS) {
+                        // Build with the Dockerfile in the 01 directory
+                        def customImage = docker.build("${DOCKER_IMAGE}", "01/")
+
+                        // Push the image
+                        customImage.push()
+
+                        // Also tag as 'latest'
+                        docker.image("${DOCKER_IMAGE}").push('latest')
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            // Clean up workspace
+            cleanWs()
+        }
+        success {
+            echo "Successfully built and pushed ${DOCKERIMAGE}"
+            echo "Image is available at: ${DOCKER_IMAGE}"
+        }
+        failure {
+            echo "Pipeline failed - check the logs for details"
+        }
+    }
+}
