@@ -22,7 +22,7 @@ spec:
           persistentVolumeClaim:
             claimName: devpvc 
       containers:
-        - image: sudarshanlnx/mongo:latest
+        - image: sooria16/knote-mongodb-2:latest
           name: dbcon
           imagePullPolicy: Always
           ports:
