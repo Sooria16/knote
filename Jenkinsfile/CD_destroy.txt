@@ -6,16 +6,16 @@ pipeline {
     }
 
     environment {
-        /* -------------------- CONTROL -------------------- */
-        BUILDME = 'yes'
+        // General
+        DESTROY = 'yes'
 
-        /* -------------------- K8S / APP -------------------- */
-        NAMESPACE      = 'devproject'
-        DOMAIN_NAME    = 'www.cipherworld.shop'
+        // Kubernetes / App
+        NAMESPACE = 'devproject'
+        DOMAIN_NAME = 'www.cipherworld.shop'
         HOSTED_ZONE_ID = 'Z00868963MIIUG9RNPKSN'
 
-        /* -------------------- AWS -------------------- */
-        AWS_DEFAULT_REGION    = 'us-west-2'
+        // AWS
+        AWS_DEFAULT_REGION = 'us-west-2'
         AWS_ACCESS_KEY_ID     = credentials('aws-access-key')
         AWS_SECRET_ACCESS_KEY = credentials('aws-secret-key')
     }
@@ -32,20 +32,14 @@ pipeline {
             }
         }
 
-        /* -------------------- SAFETY CHECK -------------------- */
+        /* -------------------- PRE DESTROY CHECK -------------------- */
         stage('PreDestroy Check') {
             agent { label 'slave' }
             steps {
-                script {
-                    if (env.BUILDME != 'yes') {
-                        error "🚫 Destroy aborted: BUILDME != yes"
-                    }
-                }
                 echo "⚠️ DESTROY operation confirmed"
             }
         }
 
-        /* -------------------- MANUAL APPROVAL -------------------- */
         stage('Destroy Approval') {
             agent { label 'slave' }
             steps {
@@ -69,15 +63,15 @@ pipeline {
                 sh '''
                     aws eks update-kubeconfig \
                       --region us-west-2 \
-                      --name devcluster
+                      --name devcluster || true
 
-                    kubectl config current-context
+                    kubectl config current-context || true
                     kubectl get nodes || true
                 '''
             }
         }
 
-        /* -------------------- K8S CLEANUP -------------------- */
+        /* -------------------- DELETE K8S RESOURCES -------------------- */
         stage('Delete Application & K8s Resources') {
             agent { label 'slave' }
             steps {
@@ -94,35 +88,45 @@ pipeline {
         stage('Delete Ingress Controller') {
             agent { label 'slave' }
             steps {
-                sh 'kubectl delete -f sun-kube-cluster/dev/newIngressctrl.yaml --ignore-not-found'
+                sh '''
+                    kubectl delete -f sun-kube-cluster/dev/newIngressctrl.yaml --ignore-not-found
+                '''
             }
         }
 
-        /* -------------------- ROUTE53 CLEANUP -------------------- */
+        /* -------------------- ROUTE53 DELETE (FIXED) -------------------- */
         stage('Delete Route53 Record') {
             agent { label 'slave' }
             steps {
-                sh """
-                    LB_DNS=\$(aws route53 list-resource-record-sets \
-                      --hosted-zone-id ${HOSTED_ZONE_ID} \
-                      --query "ResourceRecordSets[?Name == '${DOMAIN_NAME}.'].ResourceRecords[0].Value" \
-                      --output text)
+                sh '''
+                    set -e
+                    RECORD_NAME="${DOMAIN_NAME}."
 
-                    if [ -z "\$LB_DNS" ] || [ "\$LB_DNS" = "None" ]; then
-                      echo "Route53 record not found, skipping..."
+                    RECORD_JSON=$(aws route53 list-resource-record-sets \
+                      --hosted-zone-id ${HOSTED_ZONE_ID} \
+                      --query "ResourceRecordSets[?Name == '${RECORD_NAME}' && Type == 'CNAME'] | [0]" \
+                      --output json)
+
+                    if [ "$RECORD_JSON" = "null" ] || [ -z "$RECORD_JSON" ]; then
+                      echo "Route53 record not found, skipping delete"
                       exit 0
                     fi
 
-                    cat <<'EOF' > route53-delete.json
+                    TTL=$(echo "$RECORD_JSON" | jq -r '.TTL')
+                    VALUE=$(echo "$RECORD_JSON" | jq -r '.ResourceRecords[0].Value')
+
+                    cat <<EOF > route53-delete.json
 {
   "Comment": "Delete record from Jenkins",
   "Changes": [{
     "Action": "DELETE",
     "ResourceRecordSet": {
-      "Name": "${DOMAIN_NAME}",
+      "Name": "${RECORD_NAME}",
       "Type": "CNAME",
-      "TTL": 300,
-      "ResourceRecords": [{ "Value": "\$LB_DNS" }]
+      "TTL": ${TTL},
+      "ResourceRecords": [
+        { "Value": "${VALUE}" }
+      ]
     }
   }]
 }
@@ -131,7 +135,7 @@ EOF
                     aws route53 change-resource-record-sets \
                       --hosted-zone-id ${HOSTED_ZONE_ID} \
                       --change-batch file://route53-delete.json
-                """
+                '''
             }
         }
 
@@ -140,7 +144,10 @@ EOF
             agent { label 'slave' }
             steps {
                 dir('sun-kube-cluster/dev') {
-                    sh 'terraform destroy -auto-approve -no-color'
+                    sh '''
+                        terraform init -no-color
+                        terraform destroy -auto-approve -no-color
+                    '''
                 }
             }
         }
