@@ -6,23 +6,19 @@ pipeline {
     }
 
     environment {
-        // Control flag
         BUILDME = 'yes'
 
-        // Kubernetes / App
-        NAMESPACE = 'devproject'
-        DOMAIN_NAME = 'www.cipherworld.shop'
+        NAMESPACE      = 'devproject'
+        DOMAIN_NAME    = 'www.cipherworld.shop'
         HOSTED_ZONE_ID = 'Z00868963MIIUG9RNPKSN'
 
-        // AWS
-        AWS_DEFAULT_REGION = 'us-west-2'
-        AWS_ACCESS_KEY_ID     = credentials('aws-access-key')
-        AWS_SECRET_ACCESS_KEY = credentials('aws-secret-key')
+        AWS_DEFAULT_REGION      = 'us-west-2'
+        AWS_ACCESS_KEY_ID       = credentials('aws-access-key')
+        AWS_SECRET_ACCESS_KEY   = credentials('aws-secret-key')
     }
 
     stages {
 
-        /* -------------------- SCM -------------------- */
         stage('Checkout') {
             agent { label 'slave' }
             steps {
@@ -32,28 +28,26 @@ pipeline {
             }
         }
 
-        /* -------------------- SAFETY CHECK -------------------- */
         stage('PreDestroy Check') {
             agent { label 'slave' }
             steps {
                 script {
                     if (env.BUILDME != 'yes') {
-                        error "🚫 Destroy aborted: BUILDME is not set to yes"
+                        error "Destroy aborted: BUILDME != yes"
                     }
                 }
                 echo "⚠️ DESTROY operation confirmed"
             }
         }
 
-        /* -------------------- MANUAL APPROVAL -------------------- */
         stage('Destroy Approval') {
             agent { label 'slave' }
             steps {
-                input message: '⚠️ Are you sure you want to DESTROY all infrastructure?', ok: 'DESTROY'
+                input message: '⚠️ Are you sure you want to DESTROY all infrastructure?',
+                      ok: 'DESTROY'
             }
         }
 
-        /* -------------------- AWS VALIDATION -------------------- */
         stage('Test AWS Access') {
             agent { label 'slave' }
             steps {
@@ -61,7 +55,20 @@ pipeline {
             }
         }
 
-        /* -------------------- KUBERNETES CLEANUP -------------------- */
+        /* 🔥 THIS WAS MISSING 🔥 */
+        stage('Configure EKS Access') {
+            agent { label 'slave' }
+            steps {
+                sh '''
+                    aws eks update-kubeconfig \
+                      --region us-west-2 \
+                      --name devcluster
+
+                    kubectl get nodes
+                '''
+            }
+        }
+
         stage('Delete Application & K8s Resources') {
             agent { label 'slave' }
             steps {
@@ -75,7 +82,6 @@ pipeline {
             }
         }
 
-        /* -------------------- INGRESS CLEANUP -------------------- */
         stage('Delete Ingress Controller') {
             agent { label 'slave' }
             steps {
@@ -83,7 +89,6 @@ pipeline {
             }
         }
 
-        /* -------------------- ROUTE53 CLEANUP (OPTIONAL) -------------------- */
         stage('Delete Route53 Record') {
             agent { label 'slave' }
             steps {
@@ -94,49 +99,8 @@ pipeline {
                       --output text)
 
                     if [ "$LB_DNS" = "None" ]; then
-                      echo "Route53 record not found, skipping..."
+                      echo "Route53 record not found"
                       exit 0
                     fi
 
-                    cat > route53-delete.json <<EOF
-{
-  "Comment": "Delete record from Jenkins",
-  "Changes": [{
-    "Action": "DELETE",
-    "ResourceRecordSet": {
-      "Name": "${DOMAIN_NAME}",
-      "Type": "CNAME",
-      "TTL": 300,
-      "ResourceRecords": [{ "Value": "$LB_DNS" }]
-    }
-  }]
-}
-EOF
-
-                    aws route53 change-resource-record-sets \
-                      --hosted-zone-id ${HOSTED_ZONE_ID} \
-                      --change-batch file://route53-delete.json
-                '''
-            }
-        }
-
-        /* -------------------- TERRAFORM DESTROY -------------------- */
-        stage('Terraform Destroy') {
-            agent { label 'slave' }
-            steps {
-                dir('sun-kube-cluster/dev') {
-                    sh 'terraform destroy -auto-approve -no-color'
-                }
-            }
-        }
-    }
-
-    post {
-        success {
-            echo "🧨 Infrastructure destroyed successfully"
-        }
-        failure {
-            echo "❌ Destroy pipeline failed"
-        }
-    }
-}
+                    cat > route5
