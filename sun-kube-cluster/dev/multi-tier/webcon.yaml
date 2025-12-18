@@ -17,7 +17,7 @@ spec:
        env: dev
    spec:
     containers:
-    - image: sudarshanlnx/twotier:latest
+    - image: sooria16/knote-2:latest
       name: webcon
       imagePullPolicy: Always
       ports:
