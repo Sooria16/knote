@@ -1,0 +1,173 @@
+pipeline {
+    agent none
+
+    options {
+        timeout(time: 1, unit: 'HOURS')
+    }
+
+    environment {
+        // General
+        BUILDME = 'yes'
+
+        // Kubernetes / App
+        NAMESPACE = 'devproject'
+        DOMAIN_NAME = 'www.cipherworld.shop'
+        HOSTED_ZONE_ID = 'Z00868963MIIUG9RNPKSN'
+
+        // AWS
+        AWS_DEFAULT_REGION = 'us-west-2'
+        AWS_ACCESS_KEY_ID     = credentials('aws-access-key')
+        AWS_SECRET_ACCESS_KEY = credentials('aws-secret-key')
+    }
+
+    stages {
+
+        /* -------------------- SCM -------------------- */
+        stage('Checkout') {
+            agent { label 'slave' }
+            steps {
+                git branch: 'dev',
+                    credentialsId: 'github',
+                    url: 'https://github.com/Sooria16/knote.git'
+            }
+        }
+
+        /* -------------------- PRECHECK -------------------- */
+        stage('PreCheck') {
+            agent { label 'slave' }
+            steps {
+                echo "BUILDME=${env.BUILDME}"
+            }
+        }
+
+        /* -------------------- TERRAFORM -------------------- */
+        stage('Terraform Init & Plan') {
+            agent { label 'slave' }
+            when { environment name: 'BUILDME', value: 'yes' }
+            steps {
+                dir('sun-kube-cluster/dev') {
+                    sh '''
+                        terraform init -no-color
+                        terraform plan -no-color
+                    '''
+                }
+            }
+        }
+
+        stage('Terraform Approval') {
+            agent { label 'slave' }
+            when { environment name: 'BUILDME', value: 'yes' }
+            steps {
+                input message: 'Proceed with Terraform Apply?', ok: 'Apply'
+            }
+        }
+
+        stage('Terraform Apply') {
+            agent { label 'slave' }
+            when { environment name: 'BUILDME', value: 'yes' }
+            steps {
+                dir('sun-kube-cluster/dev') {
+                    sh 'terraform apply -auto-approve -no-color'
+                }
+            }
+        }
+
+        /* -------------------- AWS VALIDATION -------------------- */
+        stage('Test AWS Access') {
+            agent { label 'slave' }
+            steps {
+                sh 'aws sts get-caller-identity'
+            }
+        }
+
+        /* -------------------- KUBERNETES -------------------- */
+        stage('Deploy Namespace, Storage & DB') {
+            agent { label 'slave' }
+            when { environment name: 'BUILDME', value: 'yes' }
+            steps {
+                sh '''
+                    kubectl apply -f sun-kube-cluster/dev/ns.yaml
+                    kubectl apply -f sun-kube-cluster/dev/multi-tier/storageclass.yaml
+                    kubectl apply -f sun-kube-cluster/dev/multi-tier/pvc.yaml
+                    kubectl apply -f sun-kube-cluster/dev/multi-tier/mongodb.yaml
+                '''
+            }
+        }
+
+        stage('Deploy Ingress Controller') {
+            agent { label 'slave' }
+            steps {
+                sh 'kubectl apply -f sun-kube-cluster/dev/newIngressctrl.yaml'
+            }
+        }
+
+        stage('Wait for LoadBalancer') {
+            agent { label 'slave' }
+            steps {
+                sh '''
+                    echo "Waiting for AWS LoadBalancer..."
+                    for i in {1..30}; do
+                      LB_DNS=$(kubectl get svc -n ingress-nginx ingress-nginx-controller \
+                        -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null)
+
+                      if [ -n "$LB_DNS" ]; then
+                        echo "$LB_DNS" > lb_dns.txt
+                        exit 0
+                      fi
+                      sleep 10
+                    done
+                    echo "❌ LoadBalancer not ready"
+                    exit 1
+                '''
+            }
+        }
+
+        stage('Update Route53 Record') {
+            agent { label 'slave' }
+            steps {
+                sh '''
+                    LB_DNS=$(cat lb_dns.txt)
+
+                    cat > route53.json <<EOF
+{
+  "Comment": "Auto update from Jenkins",
+  "Changes": [{
+    "Action": "UPSERT",
+    "ResourceRecordSet": {
+      "Name": "${DOMAIN_NAME}",
+      "Type": "CNAME",
+      "TTL": 300,
+      "ResourceRecords": [{ "Value": "$LB_DNS" }]
+    }
+  }]
+}
+EOF
+
+                    aws route53 change-resource-record-sets \
+                      --hosted-zone-id ${HOSTED_ZONE_ID} \
+                      --change-batch file://route53.json
+                '''
+            }
+        }
+
+        stage('Deploy Web Application') {
+            agent { label 'slave' }
+            steps {
+                sh '''
+                    kubectl apply -f sun-kube-cluster/dev/multi-tier/webcon.yaml
+                    kubectl rollout restart deployment/frontend -n devproject
+                '''
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "✅ Application deployed successfully"
+            echo "🌐 URL: http://${DOMAIN_NAME}"
+        }
+        failure {
+            echo "❌ Deployment failed"
+        }
+    }
+}
