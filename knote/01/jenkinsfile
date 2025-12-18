@@ -9,8 +9,8 @@ pipeline {
         DOCKERHUB_USER = 'sooria16'
 
         // Image names
-        APP_NAME = 'knote-2'
-        MONGO_IMAGE_NAME = 'knote-mongodb-2'
+        APP_NAME = 'knote-3'
+        MONGO_IMAGE_NAME = 'knote-mongodb-3'
 
         JAVA_HOME = '/usr/lib/jvm/java-11-amazon-corretto.x86_64'
         PATH = "${JAVA_HOME}/bin:${PATH}"
