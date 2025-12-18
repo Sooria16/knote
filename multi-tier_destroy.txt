@@ -1,0 +1,43 @@
+pipeline {
+    agent { label 'slave' }
+
+    stages {
+
+        stage('Delete Web App') {
+            steps {
+                sh 'kubectl delete -f sun-kube-cluster/dev/multi-tier/webcon.yaml --ignore-not-found=true'
+            }
+        }
+
+        stage('Delete Ingress') {
+            steps {
+                sh 'kubectl delete -f sun-kube-cluster/dev/newIngressctrl.yaml --ignore-not-found=true'
+            }
+        }
+
+        stage('Delete DB & Storage') {
+            steps {
+                sh '''
+                    kubectl delete -f sun-kube-cluster/dev/multi-tier/mongodb.yaml --ignore-not-found=true
+                    kubectl delete -f sun-kube-cluster/dev/multi-tier/pvc.yaml --ignore-not-found=true
+                    kubectl delete -f sun-kube-cluster/dev/multi-tier/storageclass.yaml --ignore-not-found=true
+                '''
+            }
+        }
+
+        stage('Delete Namespace') {
+            steps {
+                sh 'kubectl delete namespace devproject --ignore-not-found=true'
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "✅ Cleanup completed successfully"
+        }
+        failure {
+            echo "❌ Cleanup failed"
+        }
+    }
+}
