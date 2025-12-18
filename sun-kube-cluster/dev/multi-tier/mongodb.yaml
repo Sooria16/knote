@@ -5,7 +5,7 @@ metadata:
   namespace: devproject
 spec:
   replicas: 1
-  serviceName: mongonew
+  serviceName: mongosvc
   selector:
     matchLabels:
       apptype: db
@@ -37,7 +37,7 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
- name: mongonew
+ name: mongosvc
  namespace: devproject
 spec:
  ports:
