@@ -1,0 +1,67 @@
+pipeline {
+    agent none
+    options {
+        timeout(time: 1, unit: 'HOURS')
+    }
+    stages {
+        stage('Checkout') {
+            agent { label 'slave' }
+            steps {
+                git branch: 'dev',
+                    credentialsId: 'github',
+                    url: 'https://github.com/Sooria16/knote.git'
+            }
+        }
+
+        stage('PreCheck') {
+            agent { label 'slave' }
+            steps {
+                script {
+                    env.BUILDME = "yes" // if yes then proceed
+                }
+            }
+        }
+
+        stage('Deploy Terraform') {
+            agent { label 'slave' }
+            when {
+                environment name: 'BUILDME', value: 'yes'
+            }
+            steps {
+                script {
+                    dir("sun-kube-cluster/dev") {
+                        sh 'ls'
+                        sh 'terraform init -no-color'
+                        sh 'terraform plan -no-color'
+                    }
+                }
+            }
+        }
+
+        stage('Approval') {
+            agent { label 'slave' }
+            when {
+                environment name: 'BUILDME', value: 'yes'
+            }
+            steps {
+                script {
+                    input message: 'Proceed with Terraform Destroy?', ok: 'Proceed'
+                }
+            }
+        }
+
+        stage('Destroy Terraform') {
+            agent { label 'slave' }
+            when {
+                environment name: 'BUILDME', value: 'yes'
+            }
+            steps {
+                script {
+                    dir('sun-kube-cluster/dev') {
+                        sh 'terraform destroy -auto-approve -no-color'
+                    }
+                }
+            }
+        }
+    }
+}
