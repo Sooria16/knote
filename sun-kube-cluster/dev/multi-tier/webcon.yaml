@@ -24,9 +24,6 @@ spec:
       - name: tomcat
         containerPort: 8080
         protocol: TCP
-       env:
-        - name: spring.data.mongodb.uri
-          value: mongodb://mongosvc:27017/dev
 ---
 apiVersion: v1
 kind: Service
