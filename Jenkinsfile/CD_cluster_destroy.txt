@@ -29,7 +29,7 @@ pipeline {
             }
             steps {
                 script {
-                    dir("sun-kube-cluster/dev") {
+                    dir("kube-cluster/dev") {
                         sh 'ls'
                         sh 'terraform init -no-color'
                         sh 'terraform plan -no-color'
@@ -57,11 +57,12 @@ pipeline {
             }
             steps {
                 script {
-                    dir('sun-kube-cluster/dev') {
+                    dir('kube-cluster/dev') {
                         sh 'terraform destroy -auto-approve -no-color'
                     }
                 }
             }
         }
     }
+
 }
