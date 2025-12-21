@@ -76,11 +76,11 @@ pipeline {
             agent { label 'slave' }
             steps {
                 sh '''
-                    kubectl delete -f sun-kube-cluster/dev/multi-tier/webcon.yaml --ignore-not-found
-                    kubectl delete -f sun-kube-cluster/dev/multi-tier/mongodb.yaml --ignore-not-found
-                    kubectl delete -f sun-kube-cluster/dev/multi-tier/pvc.yaml --ignore-not-found
-                    kubectl delete -f sun-kube-cluster/dev/multi-tier/storageclass.yaml --ignore-not-found
-                    kubectl delete -f sun-kube-cluster/dev/ns.yaml --ignore-not-found
+                    kubectl delete -f kube-cluster/dev/multi-tier/webcon.yaml --ignore-not-found
+                    kubectl delete -f kube-cluster/dev/multi-tier/mongodb.yaml --ignore-not-found
+                    kubectl delete -f kube-cluster/dev/multi-tier/pvc.yaml --ignore-not-found
+                    kubectl delete -f kube-cluster/dev/multi-tier/storageclass.yaml --ignore-not-found
+                    kubectl delete -f kube-cluster/dev/ns.yaml --ignore-not-found
                 '''
             }
         }
@@ -162,3 +162,4 @@ EOF
         }
     }
 }
+
