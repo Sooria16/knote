@@ -57,7 +57,7 @@ pipeline {
             }
             steps {
                 script {
-                    dir('sun-kube-cluster/dev') {
+                    dir('kube-cluster/dev') {
                         sh 'terraform apply -auto-approve -no-color'
                     }
                 }
@@ -66,3 +66,4 @@ pipeline {
     }
 
 }
+
