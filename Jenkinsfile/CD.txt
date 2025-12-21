@@ -102,10 +102,10 @@ pipeline {
             agent { label 'slave' }
             steps {
                 sh '''
-                    kubectl apply -f sun-kube-cluster/dev/ns.yaml
-                    kubectl apply -f sun-kube-cluster/dev/multi-tier/storageclass.yaml
-                    kubectl apply -f sun-kube-cluster/dev/multi-tier/pvc.yaml
-                    kubectl apply -f sun-kube-cluster/dev/multi-tier/mongodb.yaml
+                    kubectl apply -f kube-cluster/dev/ns.yaml
+                    kubectl apply -f kube-cluster/dev/multi-tier/storageclass.yaml
+                    kubectl apply -f kube-cluster/dev/multi-tier/pvc.yaml
+                    kubectl apply -f kube-cluster/dev/multi-tier/mongodb.yaml
                 '''
             }
         }
@@ -114,7 +114,7 @@ pipeline {
             agent { label 'slave' }
             steps {
                 sh '''
-                    kubectl apply -f sun-kube-cluster/dev/newIngressctrl.yaml
+                    kubectl apply -f kube-cluster/dev/newIngressctrl.yaml
                 '''
             }
         }
@@ -177,7 +177,7 @@ EOF
             agent { label 'slave' }
             steps {
                 sh '''
-                    kubectl apply -f sun-kube-cluster/dev/multi-tier/webcon.yaml
+                    kubectl apply -f kube-cluster/dev/multi-tier/webcon.yaml
                     kubectl rollout status deployment/frontend -n ${NAMESPACE}
                 '''
             }
