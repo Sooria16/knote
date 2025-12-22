@@ -50,17 +50,42 @@ pipeline {
             }
         }
 
-        /* ===================== KUBECTL ===================== */
+        /* ===================== CHECK EKS EXISTS ===================== */
+        stage('Check if EKS Exists') {
+            agent { label 'slave' }
+            steps {
+                script {
+                    def status = sh(
+                        script: """
+                          aws eks describe-cluster \
+                            --name ${CLUSTER_NAME} \
+                            --region ${AWS_DEFAULT_REGION} >/dev/null 2>&1
+                        """,
+                        returnStatus: true
+                    )
+
+                    if (status != 0) {
+                        echo "⚠️ EKS cluster does NOT exist — skipping all Kubernetes cleanup"
+                        env.EKS_EXISTS = "false"
+                    } else {
+                        echo "✅ EKS cluster exists"
+                        env.EKS_EXISTS = "true"
+                    }
+                }
+            }
+        }
+
+        /* ===================== CONFIGURE KUBECTL ===================== */
         stage('Configure kubectl') {
             agent { label 'slave' }
+            when { environment name: 'EKS_EXISTS', value: 'true' }
             steps {
                 sh '''
                     aws eks update-kubeconfig \
                       --region ${AWS_DEFAULT_REGION} \
-                      --name ${CLUSTER_NAME} || true
+                      --name ${CLUSTER_NAME}
 
-                    kubectl config current-context || true
-                    kubectl get nodes || true
+                    kubectl config current-context
                 '''
             }
         }
@@ -68,6 +93,7 @@ pipeline {
         /* ===================== DELETE APP ===================== */
         stage('Delete Application & K8s Resources') {
             agent { label 'slave' }
+            when { environment name: 'EKS_EXISTS', value: 'true' }
             steps {
                 sh '''
                     set +e
@@ -80,10 +106,18 @@ pipeline {
             }
         }
 
+        /* ===================== DELETE INGRESS ===================== */
         stage('Delete Ingress Controller') {
             agent { label 'slave' }
+            when { environment name: 'EKS_EXISTS', value: 'true' }
             steps {
                 sh '''
+                    set +e
+                    kubectl patch svc ingress-nginx-controller \
+                      -n ingress-nginx \
+                      -p '{"metadata":{"finalizers":[]}}' \
+                      --type=merge || true
+
                     kubectl delete -f kube-cluster/dev/newIngressctrl.yaml --ignore-not-found
                 '''
             }
@@ -136,47 +170,14 @@ EOF
         /* ===================== EBS CSI CLEANUP ===================== */
         stage('Delete EBS CSI Addon') {
             agent { label 'slave' }
+            when { environment name: 'EKS_EXISTS', value: 'true' }
             steps {
                 sh '''
                     set +e
-
-                    aws eks describe-addon \
+                    aws eks delete-addon \
                       --cluster-name ${CLUSTER_NAME} \
                       --addon-name aws-ebs-csi-driver \
-                      --region ${AWS_DEFAULT_REGION} >/dev/null 2>&1
-
-                    if [ $? -eq 0 ]; then
-                      aws eks delete-addon \
-                        --cluster-name ${CLUSTER_NAME} \
-                        --addon-name aws-ebs-csi-driver \
-                        --region ${AWS_DEFAULT_REGION}
-
-                      aws eks wait addon-deleted \
-                        --cluster-name ${CLUSTER_NAME} \
-                        --addon-name aws-ebs-csi-driver \
-                        --region ${AWS_DEFAULT_REGION}
-                    fi
-
-                    STACK_NAME="eksctl-${CLUSTER_NAME}-addon-aws-ebs-csi-driver"
-
-                    aws cloudformation describe-stacks \
-                      --stack-name $STACK_NAME \
-                      --region ${AWS_DEFAULT_REGION} >/dev/null 2>&1
-
-                    if [ $? -eq 0 ]; then
-                      aws cloudformation update-termination-protection \
-                        --stack-name $STACK_NAME \
-                        --no-enable-termination-protection \
-                        --region ${AWS_DEFAULT_REGION}
-
-                      aws cloudformation delete-stack \
-                        --stack-name $STACK_NAME \
-                        --region ${AWS_DEFAULT_REGION}
-
-                      aws cloudformation wait stack-delete-complete \
-                        --stack-name $STACK_NAME \
-                        --region ${AWS_DEFAULT_REGION}
-                    fi
+                      --region ${AWS_DEFAULT_REGION} || true
                 '''
             }
         }
@@ -188,7 +189,7 @@ EOF
                 dir('kube-cluster/dev') {
                     sh '''
                         terraform init -no-color
-                        terraform destroy -auto-approve -no-color
+                        terraform destroy -auto-approve -parallelism=20 -no-color
                     '''
                 }
             }
