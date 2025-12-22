@@ -3,26 +3,27 @@ pipeline {
 
     options {
         timeout(time: 1, unit: 'HOURS')
+        timestamps()
     }
 
     environment {
-        // General
-        DESTROY = 'yes'
-
-        // Kubernetes / App
-        NAMESPACE = 'devproject'
-        DOMAIN_NAME = 'www.cipherworld.shop'
-        HOSTED_ZONE_ID = 'Z00868963MIIUG9RNPKSN'
-
         // AWS
         AWS_DEFAULT_REGION = 'us-west-2'
         AWS_ACCESS_KEY_ID     = credentials('aws-access-key')
         AWS_SECRET_ACCESS_KEY = credentials('aws-secret-key')
+
+        // EKS / App
+        CLUSTER_NAME = 'devcluster'
+        NAMESPACE = 'devproject'
+
+        // DNS
+        DOMAIN_NAME = 'www.cipherworld.shop'
+        HOSTED_ZONE_ID = 'Z00868963MIIUG9RNPKSN'
     }
 
     stages {
 
-        /* -------------------- SCM -------------------- */
+        /* ===================== SCM ===================== */
         stage('Checkout') {
             agent { label 'slave' }
             steps {
@@ -32,38 +33,31 @@ pipeline {
             }
         }
 
-        /* -------------------- PRE DESTROY CHECK -------------------- */
-        stage('PreDestroy Check') {
+        /* ===================== CONFIRM ===================== */
+        stage('Destroy Confirmation') {
             agent { label 'slave' }
             steps {
-                echo "⚠️ DESTROY operation confirmed"
-            }
-        }
-
-        stage('Destroy Approval') {
-            agent { label 'slave' }
-            steps {
-                input message: '⚠️ Are you sure you want to DESTROY all infrastructure?',
+                input message: '⚠️ Are you sure you want to DESTROY ALL infrastructure?',
                       ok: 'DESTROY'
             }
         }
 
-        /* -------------------- AWS VALIDATION -------------------- */
-        stage('Test AWS Access') {
+        /* ===================== AWS VALIDATION ===================== */
+        stage('Validate AWS Access') {
             agent { label 'slave' }
             steps {
                 sh 'aws sts get-caller-identity'
             }
         }
 
-        /* -------------------- EKS CONFIG -------------------- */
-        stage('Configure EKS Access') {
+        /* ===================== KUBECTL ===================== */
+        stage('Configure kubectl') {
             agent { label 'slave' }
             steps {
                 sh '''
                     aws eks update-kubeconfig \
-                      --region us-west-2 \
-                      --name devcluster || true
+                      --region ${AWS_DEFAULT_REGION} \
+                      --name ${CLUSTER_NAME} || true
 
                     kubectl config current-context || true
                     kubectl get nodes || true
@@ -71,11 +65,12 @@ pipeline {
             }
         }
 
-        /* -------------------- DELETE K8S RESOURCES -------------------- */
+        /* ===================== DELETE APP ===================== */
         stage('Delete Application & K8s Resources') {
             agent { label 'slave' }
             steps {
                 sh '''
+                    set +e
                     kubectl delete -f kube-cluster/dev/multi-tier/webcon.yaml --ignore-not-found
                     kubectl delete -f kube-cluster/dev/multi-tier/mongodb.yaml --ignore-not-found
                     kubectl delete -f kube-cluster/dev/multi-tier/pvc.yaml --ignore-not-found
@@ -89,17 +84,17 @@ pipeline {
             agent { label 'slave' }
             steps {
                 sh '''
-                    kubectl delete -f sun-kube-cluster/dev/newIngressctrl.yaml --ignore-not-found
+                    kubectl delete -f kube-cluster/dev/newIngressctrl.yaml --ignore-not-found
                 '''
             }
         }
 
-        /* -------------------- ROUTE53 DELETE (FIXED) -------------------- */
+        /* ===================== ROUTE53 ===================== */
         stage('Delete Route53 Record') {
             agent { label 'slave' }
             steps {
                 sh '''
-                    set -e
+                    set +e
                     RECORD_NAME="${DOMAIN_NAME}."
 
                     RECORD_JSON=$(aws route53 list-resource-record-sets \
@@ -108,16 +103,15 @@ pipeline {
                       --output json)
 
                     if [ "$RECORD_JSON" = "null" ] || [ -z "$RECORD_JSON" ]; then
-                      echo "Route53 record not found, skipping delete"
+                      echo "ℹ️ Route53 record not found, skipping"
                       exit 0
                     fi
 
                     TTL=$(echo "$RECORD_JSON" | jq -r '.TTL')
                     VALUE=$(echo "$RECORD_JSON" | jq -r '.ResourceRecords[0].Value')
 
-                    cat <<EOF > route53-delete.json
+                    cat > route53-delete.json <<EOF
 {
-  "Comment": "Delete record from Jenkins",
   "Changes": [{
     "Action": "DELETE",
     "ResourceRecordSet": {
@@ -139,11 +133,59 @@ EOF
             }
         }
 
-        /* -------------------- TERRAFORM DESTROY -------------------- */
+        /* ===================== EBS CSI CLEANUP ===================== */
+        stage('Delete EBS CSI Addon') {
+            agent { label 'slave' }
+            steps {
+                sh '''
+                    set +e
+
+                    aws eks describe-addon \
+                      --cluster-name ${CLUSTER_NAME} \
+                      --addon-name aws-ebs-csi-driver \
+                      --region ${AWS_DEFAULT_REGION} >/dev/null 2>&1
+
+                    if [ $? -eq 0 ]; then
+                      aws eks delete-addon \
+                        --cluster-name ${CLUSTER_NAME} \
+                        --addon-name aws-ebs-csi-driver \
+                        --region ${AWS_DEFAULT_REGION}
+
+                      aws eks wait addon-deleted \
+                        --cluster-name ${CLUSTER_NAME} \
+                        --addon-name aws-ebs-csi-driver \
+                        --region ${AWS_DEFAULT_REGION}
+                    fi
+
+                    STACK_NAME="eksctl-${CLUSTER_NAME}-addon-aws-ebs-csi-driver"
+
+                    aws cloudformation describe-stacks \
+                      --stack-name $STACK_NAME \
+                      --region ${AWS_DEFAULT_REGION} >/dev/null 2>&1
+
+                    if [ $? -eq 0 ]; then
+                      aws cloudformation update-termination-protection \
+                        --stack-name $STACK_NAME \
+                        --no-enable-termination-protection \
+                        --region ${AWS_DEFAULT_REGION}
+
+                      aws cloudformation delete-stack \
+                        --stack-name $STACK_NAME \
+                        --region ${AWS_DEFAULT_REGION}
+
+                      aws cloudformation wait stack-delete-complete \
+                        --stack-name $STACK_NAME \
+                        --region ${AWS_DEFAULT_REGION}
+                    fi
+                '''
+            }
+        }
+
+        /* ===================== TERRAFORM ===================== */
         stage('Terraform Destroy') {
             agent { label 'slave' }
             steps {
-                dir('sun-kube-cluster/dev') {
+                dir('kube-cluster/dev') {
                     sh '''
                         terraform init -no-color
                         terraform destroy -auto-approve -no-color
@@ -160,6 +202,8 @@ EOF
         failure {
             echo "❌ Destroy pipeline failed"
         }
+        always {
+            echo "📦 Destroy pipeline finished"
+        }
     }
 }
-
