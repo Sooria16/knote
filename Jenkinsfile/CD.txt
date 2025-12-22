@@ -3,26 +3,27 @@ pipeline {
 
     options {
         timeout(time: 1, unit: 'HOURS')
+        timestamps()
     }
 
     environment {
-        // General
-        BUILD = 'yes'
-
-        // Kubernetes / App
-        NAMESPACE = 'devproject'
-        DOMAIN_NAME = 'www.cipherworld.shop'
-        HOSTED_ZONE_ID = 'Z00868963MIIUG9RNPKSN'
-
         // AWS
         AWS_DEFAULT_REGION = 'us-west-2'
         AWS_ACCESS_KEY_ID     = credentials('aws-access-key')
         AWS_SECRET_ACCESS_KEY = credentials('aws-secret-key')
+
+        // EKS
+        CLUSTER_NAME = 'devcluster'
+
+        // App / DNS
+        NAMESPACE = 'devproject'
+        DOMAIN_NAME = 'www.cipherworld.shop'
+        HOSTED_ZONE_ID = 'Z00868963MIIUG9RNPKSN'
     }
 
     stages {
 
-        /* -------------------- SCM -------------------- */
+        /* ===================== SCM ===================== */
         stage('Checkout') {
             agent { label 'slave' }
             steps {
@@ -32,36 +33,35 @@ pipeline {
             }
         }
 
-        /* -------------------- PRE CHECK -------------------- */
-        stage('PreDeploy Check') {
-            agent { label 'slave' }
-            steps {
-                echo "🚀 BUILD=${env.BUILD}"
-            }
-        }
-
-        stage('Deploy Approval') {
-            agent { label 'slave' }
-            steps {
-                input message: 'Proceed with INFRA + APP deployment?',
-                      ok: 'DEPLOY'
-            }
-        }
-
-        /* -------------------- AWS VALIDATION -------------------- */
-        stage('Test AWS Access') {
+        /* ===================== AWS ACCESS ===================== */
+        stage('Validate AWS Access') {
             agent { label 'slave' }
             steps {
                 sh 'aws sts get-caller-identity'
             }
         }
 
-        /* -------------------- TERRAFORM -------------------- */
+        /* ===================== CLUSTER CHECK ===================== */
+        stage('Check EKS Cluster Exists') {
+            agent { label 'slave' }
+            steps {
+                script {
+                    def rc = sh(
+                        script: "aws eks describe-cluster --name ${CLUSTER_NAME} --region ${AWS_DEFAULT_REGION} >/dev/null 2>&1",
+                        returnStatus: true
+                    )
+                    env.CLUSTER_EXISTS = (rc == 0) ? 'true' : 'false'
+                    echo "EKS Cluster Exists: ${env.CLUSTER_EXISTS}"
+                }
+            }
+        }
+
+        /* ===================== TERRAFORM ===================== */
         stage('Terraform Init & Plan') {
             agent { label 'slave' }
-            when { environment name: 'BUILD', value: 'yes' }
+            when { expression { env.CLUSTER_EXISTS == 'false' } }
             steps {
-                dir('sun-kube-cluster/dev') {
+                dir('kube-cluster/dev') {
                     sh '''
                         terraform init -no-color
                         terraform plan -no-color
@@ -70,39 +70,157 @@ pipeline {
             }
         }
 
-        stage('Terraform Apply') {
+        stage('Terraform Apply (Create Cluster)') {
             agent { label 'slave' }
-            when { environment name: 'BUILD', value: 'yes' }
+            when { expression { env.CLUSTER_EXISTS == 'false' } }
             steps {
-                dir('sun-kube-cluster/dev') {
-                    sh '''
-                        terraform apply -auto-approve -no-color
-                    '''
+                dir('kube-cluster/dev') {
+                    sh 'terraform apply -auto-approve -no-color'
                 }
             }
         }
 
-        /* -------------------- EKS CONFIG -------------------- */
-        stage('Configure EKS Access') {
+        /* ===================== KUBECTL ===================== */
+        stage('Configure kubectl') {
             agent { label 'slave' }
             steps {
                 sh '''
                     aws eks update-kubeconfig \
-                      --region us-west-2 \
-                      --name devcluster
+                      --region ${AWS_DEFAULT_REGION} \
+                      --name ${CLUSTER_NAME}
 
-                    kubectl config current-context
                     kubectl get nodes
                 '''
             }
         }
 
-        /* -------------------- KUBERNETES -------------------- */
-        stage('Deploy Namespace, Storage & DB') {
+        /* ===================== EKSCTL ===================== */
+        stage('Ensure eksctl Installed') {
             agent { label 'slave' }
             steps {
                 sh '''
-                    kubectl apply -f kube-cluster/dev/ns.yaml
+                    if ! command -v eksctl >/dev/null 2>&1; then
+                      curl -sSL https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz \
+                        | tar -xz -C /tmp
+                      sudo mv /tmp/eksctl /usr/local/bin/
+                    fi
+                    eksctl version
+                '''
+            }
+        }
+
+        stage('Associate IAM OIDC Provider') {
+            agent { label 'slave' }
+            steps {
+                sh '''
+                    eksctl utils associate-iam-oidc-provider \
+                      --cluster ${CLUSTER_NAME} \
+                      --approve
+                '''
+            }
+        }
+
+        /* ===================== CLEAN EBS CSI ===================== */
+        stage('Clean Existing EBS CSI Addon & Stack') {
+            agent { label 'slave' }
+            steps {
+                sh '''
+                    set +e
+                    echo "🔍 Checking EBS CSI addon..."
+
+                    aws eks describe-addon \
+                      --cluster-name ${CLUSTER_NAME} \
+                      --addon-name aws-ebs-csi-driver \
+                      --region ${AWS_DEFAULT_REGION} >/dev/null 2>&1
+
+                    if [ $? -eq 0 ]; then
+                      echo "🧹 Deleting EBS CSI addon..."
+                      aws eks delete-addon \
+                        --cluster-name ${CLUSTER_NAME} \
+                        --addon-name aws-ebs-csi-driver \
+                        --region ${AWS_DEFAULT_REGION}
+
+                      aws eks wait addon-deleted \
+                        --cluster-name ${CLUSTER_NAME} \
+                        --addon-name aws-ebs-csi-driver \
+                        --region ${AWS_DEFAULT_REGION}
+                    fi
+
+                    STACK_NAME="eksctl-${CLUSTER_NAME}-addon-aws-ebs-csi-driver"
+
+                    aws cloudformation describe-stacks \
+                      --stack-name $STACK_NAME \
+                      --region ${AWS_DEFAULT_REGION} >/dev/null 2>&1
+
+                    if [ $? -eq 0 ]; then
+                      echo "🔓 Disabling termination protection..."
+                      aws cloudformation update-termination-protection \
+                        --stack-name $STACK_NAME \
+                        --no-enable-termination-protection \
+                        --region ${AWS_DEFAULT_REGION}
+
+                      echo "🧨 Deleting CloudFormation stack..."
+                      aws cloudformation delete-stack \
+                        --stack-name $STACK_NAME \
+                        --region ${AWS_DEFAULT_REGION}
+
+                      aws cloudformation wait stack-delete-complete \
+                        --stack-name $STACK_NAME \
+                        --region ${AWS_DEFAULT_REGION}
+                    fi
+                '''
+            }
+        }
+
+        /* ===================== CREATE EBS CSI ===================== */
+        stage('Create EBS CSI Addon') {
+            agent { label 'slave' }
+            steps {
+                sh '''
+                    eksctl create addon \
+                      --name aws-ebs-csi-driver \
+                      --cluster ${CLUSTER_NAME}
+                '''
+            }
+        }
+
+        stage('Verify EBS CSI Driver') {
+            agent { label 'slave' }
+            steps {
+                sh '''
+                    echo "⏳ Waiting for EBS CSI addon to become ACTIVE..."
+                    aws eks wait addon-active \
+                      --cluster-name ${CLUSTER_NAME} \
+                      --addon-name aws-ebs-csi-driver \
+                      --region ${AWS_DEFAULT_REGION}
+
+                    echo "⏳ Waiting for CSI pods..."
+                    for i in {1..30}; do
+                      PODS=$(kubectl get pods -n kube-system | grep ebs-csi | wc -l)
+                      if [ "$PODS" -gt 0 ]; then
+                        kubectl get pods -n kube-system | grep ebs-csi
+                        break
+                      fi
+                      sleep 10
+                    done
+
+                    kubectl get csidriver ebs.csi.aws.com
+                '''
+            }
+        }
+
+        /* ===================== APP DEPLOY ===================== */
+        stage('Create Namespace') {
+            agent { label 'slave' }
+            steps {
+                sh 'kubectl apply -f kube-cluster/dev/ns.yaml'
+            }
+        }
+
+        stage('Apply Storage & Database') {
+            agent { label 'slave' }
+            steps {
+                sh '''
                     kubectl apply -f kube-cluster/dev/multi-tier/storageclass.yaml
                     kubectl apply -f kube-cluster/dev/multi-tier/pvc.yaml
                     kubectl apply -f kube-cluster/dev/multi-tier/mongodb.yaml
@@ -110,75 +228,60 @@ pipeline {
             }
         }
 
-        stage('Deploy Ingress Controller') {
+        stage('Deploy Application') {
             agent { label 'slave' }
             steps {
-                sh '''
-                    kubectl apply -f kube-cluster/dev/newIngressctrl.yaml
-                '''
+                sh 'kubectl apply -f kube-cluster/dev/multi-tier/webcon.yaml'
             }
         }
 
+        stage('Deploy Ingress Controller') {
+            agent { label 'slave' }
+            steps {
+                sh 'kubectl apply -f kube-cluster/dev/newIngressctrl.yaml'
+            }
+        }
+
+        /* ===================== DNS ===================== */
         stage('Wait for LoadBalancer') {
             agent { label 'slave' }
             steps {
                 sh '''
-                    echo "⏳ Waiting for AWS LoadBalancer..."
                     for i in {1..30}; do
                       LB_DNS=$(kubectl get svc -n ingress-nginx ingress-nginx-controller \
                         -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null)
-
                       if [ -n "$LB_DNS" ]; then
                         echo "$LB_DNS" > lb_dns.txt
-                        echo "✅ LB Ready: $LB_DNS"
                         exit 0
                       fi
                       sleep 10
                     done
-                    echo "❌ LoadBalancer not ready"
                     exit 1
                 '''
             }
         }
 
-        /* -------------------- ROUTE53 UPSERT -------------------- */
-        stage('Update Route53 Record') {
+        stage('Update Route53') {
             agent { label 'slave' }
             steps {
                 sh '''
                     LB_DNS=$(cat lb_dns.txt)
-
-                    cat <<EOF > route53-upsert.json
+                    cat > route53.json <<EOF
 {
-  "Comment": "Auto update from Jenkins",
   "Changes": [{
     "Action": "UPSERT",
     "ResourceRecordSet": {
-      "Name": "${DOMAIN_NAME}",
+      "Name": "${DOMAIN_NAME}.",
       "Type": "CNAME",
       "TTL": 300,
-      "ResourceRecords": [
-        { "Value": "$LB_DNS" }
-      ]
+      "ResourceRecords": [{ "Value": "$LB_DNS" }]
     }
   }]
 }
 EOF
-
                     aws route53 change-resource-record-sets \
                       --hosted-zone-id ${HOSTED_ZONE_ID} \
-                      --change-batch file://route53-upsert.json
-                '''
-            }
-        }
-
-        /* -------------------- APP DEPLOY -------------------- */
-        stage('Deploy Web Application') {
-            agent { label 'slave' }
-            steps {
-                sh '''
-                    kubectl apply -f kube-cluster/dev/multi-tier/webcon.yaml
-                    kubectl rollout status deployment/frontend -n ${NAMESPACE}
+                      --change-batch file://route53.json
                 '''
             }
         }
@@ -186,14 +289,14 @@ EOF
 
     post {
         success {
-            echo "✅ Application deployed successfully"
+            echo "🚀 Deployment completed successfully"
             echo "🌐 URL: http://${DOMAIN_NAME}"
         }
         failure {
-            echo "❌ Deployment failed"
+            echo "❌ Pipeline failed"
         }
         always {
-            echo "📦 Pipeline finished at ${new Date()}"
+            echo "📦 Finished at ${new Date()}"
         }
     }
 }
