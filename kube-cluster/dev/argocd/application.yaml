@@ -12,7 +12,7 @@ spec:
     path: kube-cluster/dev/multi-tier
   destination: 
     server: https://kubernetes.default.svc
-    namespace: myapp
+    namespace: devproject
 
   syncPolicy:
     syncOptions:
