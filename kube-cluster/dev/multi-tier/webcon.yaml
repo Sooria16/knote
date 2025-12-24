@@ -45,6 +45,8 @@ kind: Ingress
 metadata:
   name: webingress
   namespace: devproject
+  annotations:
+    kubernetes.io/ingress.class: nginx 
 spec:
   ingressClassName: nginx
   rules:
@@ -58,3 +60,4 @@ spec:
                 name: websvc
                 port:
                   number: 80
+
