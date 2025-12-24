@@ -1,0 +1,210 @@
+pipeline {
+    agent none
+
+    options {
+        timeout(time: 1, unit: 'HOURS')
+        timestamps()
+    }
+
+    environment {
+        // AWS
+        AWS_DEFAULT_REGION = 'us-west-2'
+        AWS_ACCESS_KEY_ID     = credentials('aws-access-key')
+        AWS_SECRET_ACCESS_KEY = credentials('aws-secret-key')
+
+        // EKS / App
+        CLUSTER_NAME = 'devcluster'
+        NAMESPACE = 'devproject'
+
+        // DNS
+        DOMAIN_NAME = 'www.cipherworld.shop'
+        HOSTED_ZONE_ID = 'Z00868963MIIUG9RNPKSN'
+    }
+
+    stages {
+
+        /* ===================== SCM ===================== */
+        stage('Checkout') {
+            agent { label 'slave' }
+            steps {
+                git branch: 'dev',
+                    credentialsId: 'github',
+                    url: 'https://github.com/Sooria16/knote.git'
+            }
+        }
+
+        /* ===================== CONFIRM ===================== */
+        stage('Destroy Confirmation') {
+            agent { label 'slave' }
+            steps {
+                input message: '⚠️ Are you sure you want to DESTROY ALL infrastructure?',
+                      ok: 'DESTROY'
+            }
+        }
+
+        /* ===================== AWS VALIDATION ===================== */
+        stage('Validate AWS Access') {
+            agent { label 'slave' }
+            steps {
+                sh 'aws sts get-caller-identity'
+            }
+        }
+
+        /* ===================== CHECK EKS EXISTS ===================== */
+        stage('Check if EKS Exists') {
+            agent { label 'slave' }
+            steps {
+                script {
+                    def status = sh(
+                        script: """
+                          aws eks describe-cluster \
+                            --name ${CLUSTER_NAME} \
+                            --region ${AWS_DEFAULT_REGION} >/dev/null 2>&1
+                        """,
+                        returnStatus: true
+                    )
+
+                    if (status != 0) {
+                        echo "⚠️ EKS cluster does NOT exist — skipping all Kubernetes cleanup"
+                        env.EKS_EXISTS = "false"
+                    } else {
+                        echo "✅ EKS cluster exists"
+                        env.EKS_EXISTS = "true"
+                    }
+                }
+            }
+        }
+
+        /* ===================== CONFIGURE KUBECTL ===================== */
+        stage('Configure kubectl') {
+            agent { label 'slave' }
+            when { environment name: 'EKS_EXISTS', value: 'true' }
+            steps {
+                sh '''
+                    aws eks update-kubeconfig \
+                      --region ${AWS_DEFAULT_REGION} \
+                      --name ${CLUSTER_NAME}
+
+                    kubectl config current-context
+                '''
+            }
+        }
+
+        /* ===================== DELETE APP ===================== */
+        stage('Delete Application & K8s Resources') {
+            agent { label 'slave' }
+            when { environment name: 'EKS_EXISTS', value: 'true' }
+            steps {
+                sh '''
+                    set +e
+                    kubectl delete -f kube-cluster/dev/multi-tier/webcon.yaml --ignore-not-found
+                    kubectl delete -f kube-cluster/dev/multi-tier/mongodb.yaml --ignore-not-found
+                    kubectl delete -f kube-cluster/dev/multi-tier/pvc.yaml --ignore-not-found
+                    kubectl delete -f kube-cluster/dev/multi-tier/storageclass.yaml --ignore-not-found
+                    kubectl delete -f kube-cluster/dev/ns.yaml --ignore-not-found
+                '''
+            }
+        }
+
+        /* ===================== DELETE INGRESS ===================== */
+        stage('Delete Ingress Controller') {
+            agent { label 'slave' }
+            when { environment name: 'EKS_EXISTS', value: 'true' }
+            steps {
+                sh '''
+                    set +e
+                    kubectl patch svc ingress-nginx-controller \
+                      -n ingress-nginx \
+                      -p '{"metadata":{"finalizers":[]}}' \
+                      --type=merge || true
+
+                    kubectl delete -f kube-cluster/dev/newIngressctrl.yaml --ignore-not-found
+                '''
+            }
+        }
+
+        /* ===================== ROUTE53 ===================== */
+        stage('Delete Route53 Record') {
+            agent { label 'slave' }
+            steps {
+                sh '''
+                    set +e
+                    RECORD_NAME="${DOMAIN_NAME}."
+
+                    RECORD_JSON=$(aws route53 list-resource-record-sets \
+                      --hosted-zone-id ${HOSTED_ZONE_ID} \
+                      --query "ResourceRecordSets[?Name == '${RECORD_NAME}' && Type == 'CNAME'] | [0]" \
+                      --output json)
+
+                    if [ "$RECORD_JSON" = "null" ] || [ -z "$RECORD_JSON" ]; then
+                      echo "ℹ️ Route53 record not found, skipping"
+                      exit 0
+                    fi
+
+                    TTL=$(echo "$RECORD_JSON" | jq -r '.TTL')
+                    VALUE=$(echo "$RECORD_JSON" | jq -r '.ResourceRecords[0].Value')
+
+                    cat > route53-delete.json <<EOF
+{
+  "Changes": [{
+    "Action": "DELETE",
+    "ResourceRecordSet": {
+      "Name": "${RECORD_NAME}",
+      "Type": "CNAME",
+      "TTL": ${TTL},
+      "ResourceRecords": [
+        { "Value": "${VALUE}" }
+      ]
+    }
+  }]
+}
+EOF
+
+                    aws route53 change-resource-record-sets \
+                      --hosted-zone-id ${HOSTED_ZONE_ID} \
+                      --change-batch file://route53-delete.json
+                '''
+            }
+        }
+
+        /* ===================== EBS CSI CLEANUP ===================== */
+        stage('Delete EBS CSI Addon') {
+            agent { label 'slave' }
+            when { environment name: 'EKS_EXISTS', value: 'true' }
+            steps {
+                sh '''
+                    set +e
+                    aws eks delete-addon \
+                      --cluster-name ${CLUSTER_NAME} \
+                      --addon-name aws-ebs-csi-driver \
+                      --region ${AWS_DEFAULT_REGION} || true
+                '''
+            }
+        }
+
+        /* ===================== TERRAFORM ===================== */
+        stage('Terraform Destroy') {
+            agent { label 'slave' }
+            steps {
+                dir('kube-cluster/dev') {
+                    sh '''
+                        terraform init -no-color
+                        terraform destroy -auto-approve -parallelism=20 -no-color
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "🧨 Infrastructure destroyed successfully"
+        }
+        failure {
+            echo "❌ Destroy pipeline failed"
+        }
+        always {
+            echo "📦 Destroy pipeline finished"
+        }
+    }
+}
