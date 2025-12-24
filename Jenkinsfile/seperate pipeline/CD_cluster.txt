@@ -7,7 +7,7 @@ pipeline {
         stage('Checkout') {
             agent { label 'slave' }
             steps {
-                git branch: 'dev',
+                git branch: 'main',
                     credentialsId: 'github',
                     url: 'https://github.com/Sooria16/knote.git'
             }
