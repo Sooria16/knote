@@ -9,10 +9,10 @@ spec:
   source:
     repoURL: https://github.com/Sooria16/knote.git
     targetRevision: main
-    path: kube-cluster/dev
+    path: kube-cluster/dev/multi-tier
   destination: 
     server: https://kubernetes.default.svc
-    namespace: myapp
+    namespace: devproject
 
   syncPolicy:
     syncOptions:
