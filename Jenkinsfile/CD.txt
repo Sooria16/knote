@@ -18,7 +18,7 @@ pipeline {
         // App / DNS
         NAMESPACE = 'devproject'
         DOMAIN_NAME = 'www.cipherworld.shop'
-        HOSTED_ZONE_ID = 'Z00868963MIIUG9RNPKSN'
+        HOSTED_ZONE_ID = 'Z006951638KEXUAHFA7HX'
     }
 
     stages {
@@ -300,3 +300,4 @@ EOF
         }
     }
 }
+
