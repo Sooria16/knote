@@ -14,8 +14,8 @@ pipeline {
         CLUSTER_NAME = 'devcluster'
         NAMESPACE    = 'devproject'
 
-        DOMAIN_NAME     = 'www.cipherworld.shop'
-        HOSTED_ZONE_ID  = 'Z00868963MIIUG9RNPKSN'
+        DOMAIN_NAME    = 'www.cipherworld.shop'
+        HOSTED_ZONE_ID = 'Z00868963MIIUG9RNPKSN'
 
         // MUST match VPC Name tag
         VPC_NAME_TAG = 'dev-eks-vpc'
@@ -119,24 +119,26 @@ pipeline {
                     --query "ResourceRecordSets[?Name=='${RECORD_NAME}' && Type=='CNAME'] | [0]" \
                     --output json)
 
-                  [ "$RECORD" = "null" ] && exit 0
-
-                  TTL=$(echo $RECORD | jq -r .TTL)
-                  VALUE=$(echo $RECORD | jq -r .ResourceRecords[0].Value)
+                  [ "$RECORD" = "null" ] && echo "No Route53 record found" && exit 0
 
                   aws route53 change-resource-record-sets \
                     --hosted-zone-id ${HOSTED_ZONE_ID} \
-                    --change-batch "{
-                      \"Changes\":[{
-                        \"Action\":\"DELETE\",
-                        \"ResourceRecordSet\":{
-                          \"Name\":\"${RECORD_NAME}\",
-                          \"Type\":\"CNAME\",
-                          \"TTL\":$TTL,
-                          \"ResourceRecords\":[{\"Value\":\"$VALUE\"}]
-                        }
-                      }]
-                    }"
+                    --change-batch "$(jq -n \
+                      --arg name "$RECORD_NAME" \
+                      --arg value "$(echo $RECORD | jq -r .ResourceRecords[0].Value)" \
+                      --argjson ttl "$(echo $RECORD | jq -r .TTL)" \
+                      '{
+                        Changes: [{
+                          Action: "DELETE",
+                          ResourceRecordSet: {
+                            Name: $name,
+                            Type: "CNAME",
+                            TTL: $ttl,
+                            ResourceRecords: [{ Value: $value }]
+                          }
+                        }]
+                      }'
+                    )"
                 '''
             }
         }
@@ -155,7 +157,7 @@ pipeline {
             }
         }
 
-        /* ===================== 🔥 FINAL AWS NUKE ===================== */
+        /* ===================== 🔥 FINAL VPC NUKE ===================== */
         stage('🔥 Final VPC Dependency Nuke') {
             agent { label 'slave' }
             steps {
@@ -166,8 +168,8 @@ pipeline {
                     --query 'Vpcs[0].VpcId' \
                     --output text)
 
-                  [ "$VPC_ID" = "None" ] && exit 0
-                  echo "VPC=$VPC_ID"
+                  [ "$VPC_ID" = "None" ] && echo "No VPC found" && exit 0
+                  echo "Destroying VPC: $VPC_ID"
 
                   aws elb describe-load-balancers \
                     --query 'LoadBalancerDescriptions[].LoadBalancerName' \
