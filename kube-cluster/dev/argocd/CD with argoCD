@@ -23,7 +23,7 @@ pipeline {
         stage('Checkout') {
             agent { label 'slave' }
             steps {
-                git branch: 'dev',
+                git branch: 'main',
                     credentialsId: 'github',
                     url: 'https://github.com/Sooria16/knote.git'
             }
@@ -187,7 +187,7 @@ pipeline {
             agent { label 'slave' }
             steps {
                 sh '''
-                    kubectl apply -f argoserver.yaml -n argocd
+                    kubectl apply -f kube-cluster/dev/argocd/argoserver.yaml -n argocd
                 '''
             }
         }
@@ -223,7 +223,7 @@ pipeline {
         stage('Apply ArgoCD Application') {
             agent { label 'slave' }
             steps {
-                sh 'kubectl apply -f application.yaml'
+                sh 'kubectl apply -f kube-cluster/dev/argocd/application.yaml'
             }
         }
 
