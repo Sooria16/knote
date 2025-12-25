@@ -50,19 +50,31 @@ pipeline {
             }
         }
 
-        /* ===================== CHECK EKS ===================== */
+        /* ===================== CHECK EKS EXISTS ===================== */
         stage('Check if EKS Exists') {
             agent { label 'slave' }
             steps {
                 script {
                     def status = sh(
-                        script: "aws eks describe-cluster --name ${CLUSTER_NAME} --region ${AWS_DEFAULT_REGION} >/dev/null 2>&1",
+                        script: """
+                          aws eks describe-cluster \
+                            --name ${CLUSTER_NAME} \
+                            --region ${AWS_DEFAULT_REGION} >/dev/null 2>&1
+                        """,
                         returnStatus: true
                     )
-                    env.EKS_EXISTS = (status == 0) ? "true" : "false"
+
+                    if (status != 0) {
+                        echo "⚠️ EKS cluster does NOT exist — skipping all Kubernetes cleanup"
+                        env.EKS_EXISTS = "false"
+                    } else {
+                        echo "✅ EKS cluster exists"
+                        env.EKS_EXISTS = "true"
+                    }
                 }
             }
         }
+
 
         /* ===================== KUBECTL ===================== */
         stage('Configure kubectl') {
@@ -106,43 +118,53 @@ pipeline {
             }
         }
 
+
         /* ===================== ROUTE53 ===================== */
         stage('Delete Route53 Record') {
             agent { label 'slave' }
             steps {
                 sh '''
-                  set +e
-                  RECORD_NAME="${DOMAIN_NAME}."
+                    set +e
+                    RECORD_NAME="${DOMAIN_NAME}."
 
-                  RECORD=$(aws route53 list-resource-record-sets \
-                    --hosted-zone-id ${HOSTED_ZONE_ID} \
-                    --query "ResourceRecordSets[?Name=='${RECORD_NAME}' && Type=='CNAME'] | [0]" \
-                    --output json)
+                    RECORD_JSON=$(aws route53 list-resource-record-sets \
+                      --hosted-zone-id ${HOSTED_ZONE_ID} \
+                      --query "ResourceRecordSets[?Name == '${RECORD_NAME}' && Type == 'CNAME'] | [0]" \
+                      --output json)
 
-                  [ "$RECORD" = "null" ] && echo "No Route53 record found" && exit 0
+                    if [ "$RECORD_JSON" = "null" ] || [ -z "$RECORD_JSON" ]; then
+                      echo "ℹ️ Route53 record not found, skipping"
+                      exit 0
+                    fi
 
-                  aws route53 change-resource-record-sets \
-                    --hosted-zone-id ${HOSTED_ZONE_ID} \
-                    --change-batch "$(jq -n \
-                      --arg name "$RECORD_NAME" \
-                      --arg value "$(echo $RECORD | jq -r .ResourceRecords[0].Value)" \
-                      --argjson ttl "$(echo $RECORD | jq -r .TTL)" \
-                      '{
-                        Changes: [{
-                          Action: "DELETE",
-                          ResourceRecordSet: {
-                            Name: $name,
-                            Type: "CNAME",
-                            TTL: $ttl,
-                            ResourceRecords: [{ Value: $value }]
-                          }
-                        }]
-                      }'
-                    )"
+                    TTL=$(echo "$RECORD_JSON" | jq -r '.TTL')
+                    VALUE=$(echo "$RECORD_JSON" | jq -r '.ResourceRecords[0].Value')
+
+                    cat > route53-delete.json <<EOF
+{
+  "Changes": [{
+    "Action": "DELETE",
+    "ResourceRecordSet": {
+      "Name": "${RECORD_NAME}",
+      "Type": "CNAME",
+      "TTL": ${TTL},
+      "ResourceRecords": [
+        { "Value": "${VALUE}" }
+      ]
+    }
+  }]
+}
+EOF
+
+                    aws route53 change-resource-record-sets \
+                      --hosted-zone-id ${HOSTED_ZONE_ID} \
+                      --change-batch file://route53-delete.json
                 '''
             }
         }
 
+
+    
         /* ===================== DELETE EBS CSI ===================== */
         stage('Delete EBS CSI Addon') {
             agent { label 'slave' }
