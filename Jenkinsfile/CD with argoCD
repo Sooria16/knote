@@ -238,14 +238,34 @@ pipeline {
         stage('Deploy ArgoCD') {
             agent { label 'slave' }
             steps {
-                sh 'kubectl apply -f kube-cluster/dev/argocd/argoserver.yaml -n argocd'
+                sh '''
+                    kubectl apply -f kube-cluster/dev/argocd/argoserver.yaml -n argocd
+                '''
             }
         }
 
-        stage('Verify ArgoCD Pods') {
+        stage('Wait for ArgoCD Server') {
             agent { label 'slave' }
             steps {
-                sh 'kubectl get pods -n argocd'
+                sh '''
+                    echo "⏳ Waiting for argocd-server deployment to be ready..."
+                    kubectl wait deployment argocd-server \
+                      -n argocd \
+                      --for=condition=Available \
+                      --timeout=300s
+                '''
+            }
+        }
+
+        stage('Wait for ArgoCD Admin Secret') {
+            agent { label 'slave' }
+            steps {
+                sh '''
+                    echo "⏳ Waiting for argocd-initial-admin-secret..."
+                    until kubectl -n argocd get secret argocd-initial-admin-secret >/dev/null 2>&1; do
+                      sleep 5
+                    done
+                '''
             }
         }
 
@@ -253,8 +273,10 @@ pipeline {
             agent { label 'slave' }
             steps {
                 sh '''
-                    kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d; echo
-
+                    echo "🔐 ArgoCD Admin Password:"
+                    kubectl -n argocd get secret argocd-initial-admin-secret \
+                      -o jsonpath="{.data.password}" | base64 -d
+                    echo
                 '''
             }
         }
@@ -272,7 +294,9 @@ pipeline {
         stage('Apply ArgoCD Application') {
             agent { label 'slave' }
             steps {
-                sh 'kubectl apply -f kube-cluster/dev/argocd/application.yaml'
+                sh '''
+                    kubectl apply -f kube-cluster/dev/argocd/application.yaml
+                '''
             }
         }
 
